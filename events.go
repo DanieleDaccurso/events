@@ -1,43 +1,72 @@
 package events
 
-import (
-	"sort"
-	"reflect"
-)
+import "reflect"
 
-type Event interface {}
+var LastError string = ""
 
-type onReturnFN func([]reflect.Value)
+// OnReturnFN is the function which is executed after the event is dispatched. If the event returned
+// data, the reflection representation of the data will be passed to the function as first
+// argument. The function is executed regardless of the contents of the return
+type OnReturnFN func([]reflect.Value)
 
-// DispatchEvents will dispatch a map of events, by their int values, with an empty callback.
-// If you need to process the result of your events, consider using DispatchEventsCallback
-func DispatchEvents(evList map[int]Event, withContext interface{} )  {
-	DispatchEventsCallback(evList, withContext, func(e []reflect.Value) {})
+// DispatchEvent dispatches a single event with a context
+func DispatchEvent(ev Event, withContext interface{}) {
+	// Dispatch an event with no callback by calling the DispatchEventCallback function
+	// with a nil callback.
+	DispatchEventCallback(ev, withContext, nil)
 }
 
-// DispatchEventsCallback will dispatch a map of events, by their int values. Unlike DispatchEvent, it will
-// execute the additionally passed function if the event does not have an empty return.
-// If the return of your event is empty, the callback function will not be executed.
-func DispatchEventsCallback(evList map[int]Event, withContext interface{}, callback onReturnFN) {
-	// maps are unsorted, we need a sorted slice of map keys
-	var evKeys []int
-	for k := range evList {
-		evKeys = append(evKeys, k)
-	}
-	sort.Ints(evKeys)
+// DispatchEventCallback dispatches a single event with a context and a callback function
+func DispatchEventCallback(ev Event, withContext interface{}, callback OnReturnFN) {
+	// The internal dispatcher requires a reflection representation of the context
+	ctx := createContext(withContext)
+	dispatchEvent(ev, ctx, callback)
+}
 
-	// generate a reflection value of the event context
-	reflectCtx := reflect.ValueOf(withContext)
+// DispatchEvents dispatches an EventCollection with a context
+func DispatchEvents(evs *EventCollection, withContext interface{}) {
+	DispatchEventsCallback(evs, withContext, nil)
+}
 
-	// dispatch events in correct order
-	for _, key := range evKeys {
-		inst := reflect.ValueOf(evList[key])
-		// For performance reasons, this method won't check if there is an Exec method on the struct.
-		// Using the correct type of event is done by the container of the events itself.
-		// Please refer to the documentation for further instruction
-		ret := inst.MethodByName("Exec").Call([]reflect.Value{reflectCtx})
-		if len(ret) > 0 {
-			callback(ret)
-		}
+// DispatchEvents dispatches an EventCollection with a context and a callback function
+func DispatchEventsCallback(evs *EventCollection, withContext interface{}, callback OnReturnFN) {
+	evs.sort()
+	ctx := createContext(withContext)
+	for _, ec := range evs.events {
+		dispatchEvent(ec.ev, ctx, callback)
 	}
+}
+
+// dispatchEvent is the central function to dispatch an event. All other dispatching methods
+// will call this one on some level. When facing issues with the event system, this function
+// is the best point to set breakpoints.
+//
+// Please consider the further explanations on non-strict handling.
+func dispatchEvent(ev Event, ctx []reflect.Value, callback OnReturnFN) {
+	// Create a reflection representation of the event
+	rev := reflect.ValueOf(ev)
+	// Get the Exec method. If the Exec method does not exist, an empty reflect value
+	// is returned.
+	method := rev.MethodByName("Exec")
+
+	// Assert that the Exec method actually exists. If no Exec method exists, the system
+	// stop the execution of this event. To avoid a runtime-panic, the error gets pushed to
+	// the LastError variable.
+	//
+	// Consider setting a breakpoint on the assignment line of LastError for debugging purposes
+	// when facing problems with the event dispatcher.
+	if method.Kind() != reflect.Func {
+		LastError = "Event " + rev.String() + " has no Exec method. An Exec method is required."
+		return
+	}
+
+	ret := method.Call(ctx)
+
+	if callback != nil {
+		callback(ret)
+	}
+}
+
+func createContext(context interface{}) []reflect.Value {
+	return []reflect.Value{reflect.ValueOf(context)}
 }
